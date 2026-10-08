@@ -10,6 +10,8 @@ interface Identity {
 interface Signature {
   authority?: string
   teamId?: string
+  runtime: boolean
+  timestamp: boolean
 }
 
 export const FORMATS = ['UDZO', 'ULFO', 'ULMO', 'UDBZ'] as const
@@ -27,7 +29,12 @@ export function parseSignature(text: string): Signature {
   // codesign lists the chain leaf first.
   const authority = /^Authority=(.+)$/m.exec(text)?.[1].trim()
   const team = /^TeamIdentifier=(.+)$/m.exec(text)?.[1].trim()
-  return {authority, teamId: team && team !== 'not set' ? team : undefined}
+  return {
+    authority,
+    teamId: team && team !== 'not set' ? team : undefined,
+    runtime: /^CodeDirectory .*flags=0x[0-9a-f]+\([^)]*\bruntime\b/m.test(text),
+    timestamp: /^Timestamp=/m.test(text)
+  }
 }
 
 export function checkSignature(
@@ -39,6 +46,18 @@ export function checkSignature(
     throw new Error(
       `${appPath} is not signed with Developer ID (Authority: ${sig.authority ?? 'none, ad-hoc or unsigned'}). ` +
         'Notarization will reject it. Export the app with the developer-id method.'
+    )
+  }
+  if (!sig.runtime) {
+    throw new Error(
+      `${appPath} is not signed with the hardened runtime. Notarization will reject it. ` +
+        'Enable Hardened Runtime for the target (ENABLE_HARDENED_RUNTIME = YES).'
+    )
+  }
+  if (!sig.timestamp) {
+    throw new Error(
+      `${appPath} has no secure timestamp. Notarization will reject it. ` +
+        'Export the app with the developer-id method, which signs with a timestamp.'
     )
   }
   // Non-Apple certificates leave TeamIdentifier unset, so fall back to the
@@ -189,7 +208,7 @@ export async function selectIdentity(options: {
   return identity.hash
 }
 
-export async function createImage(args: string[], attempts = 3): Promise<void> {
+export async function createImage(args: string[], attempts = 5): Promise<void> {
   for (let attempt = 1; ; attempt++) {
     const out = await getExecOutput('hdiutil', ['create', ...args], {
       ignoreReturnCode: true
@@ -207,6 +226,37 @@ export async function createImage(args: string[], attempts = 3): Promise<void> {
     warning(
       `hdiutil create attempt ${attempt} failed with Resource busy; retrying`
     )
-    await sleep(2_000 * attempt)
+    await sleep(5_000 * attempt)
+  }
+}
+
+export async function signDmg(
+  hash: string,
+  dmgPath: string,
+  keychain?: string,
+  attempts = 3
+): Promise<void> {
+  const keychainOption = keychain ? ['--keychain', keychain] : []
+  for (let attempt = 1; ; attempt++) {
+    // Notarization rejects a DMG signed without a secure timestamp.
+    const out = await getExecOutput(
+      'codesign',
+      ['--sign', hash, '--timestamp', '--force', ...keychainOption, dmgPath],
+      {ignoreReturnCode: true}
+    )
+    if (out.exitCode === 0) return
+    const text = `${out.stdout}\n${out.stderr}`.trim()
+    if (!/timestamp/i.test(text)) {
+      throw new Error(`codesign failed for ${dmgPath}: ${text}`)
+    }
+    if (attempt >= attempts) {
+      throw new Error(
+        `codesign could not get a secure timestamp after ${attempts} attempts: ${text}`
+      )
+    }
+    warning(
+      `codesign attempt ${attempt} failed to get a secure timestamp; retrying`
+    )
+    await sleep(10_000 * attempt)
   }
 }

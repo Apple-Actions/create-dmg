@@ -14,6 +14,7 @@ import {
   checkSignature,
   createImage,
   selectIdentity,
+  signDmg,
   verifyApp
 } from './dmg'
 
@@ -92,15 +93,7 @@ async function main(): Promise<void> {
       dmgPath
     ])
 
-    const keychainArgs = keychain ? ['--keychain', keychain] : []
-    // Notarization rejects a DMG signed without a secure timestamp.
-    await exec('codesign', [
-      '--sign',
-      hash,
-      '--timestamp',
-      ...keychainArgs,
-      dmgPath
-    ])
+    await signDmg(hash, dmgPath, keychain)
     await exec('codesign', ['--verify', '--strict', dmgPath])
 
     setOutput('dmg-path', dmgPath)

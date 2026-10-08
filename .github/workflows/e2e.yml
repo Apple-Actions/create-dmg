@@ -13,7 +13,8 @@ on:
 jobs:
   e2e:
     name: e2e
-    runs-on: macos-latest
+    runs-on: macos-26
+    timeout-minutes: 15
 
     env:
       CERT_NAME: "Developer ID Application: Test (ABCDE12345)"
@@ -149,12 +150,9 @@ jobs:
           echo "$output" | grep -qF "::error::$adhoc is not signed with Developer ID" \
             || { echo "::error::Expected the Developer ID failure message"; exit 1; }
 
+      # The runner is discarded after the job, so the admin trust settings
+      # aren't removed; `security remove-trusted-cert -d` waits for an
+      # authorization prompt that never comes.
       - name: Clean up
         if: always()
-        run: |
-          for days in 30 365; do
-            if [ -f "$RUNNER_TEMP/cert-$days.pem" ]; then
-              sudo security remove-trusted-cert -d "$RUNNER_TEMP/cert-$days.pem" || true
-            fi
-          done
-          security delete-keychain "$RUNNER_TEMP/create-dmg-e2e.keychain-db" || true
+        run: security delete-keychain "$RUNNER_TEMP/create-dmg-e2e.keychain-db" || true
