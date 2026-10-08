@@ -17,11 +17,11 @@ Xcode has no DMG export, and Apple recommends notarizing the outermost container
 
 The action:
 
-1. Checks the app: it must exist, pass `codesign --verify --deep --strict`, and be signed with a `Developer ID Application` certificate. If `team-id` is set, the app's team must match it.
+1. Checks the app before you spend a notarization round trip on it. It must exist, pass `codesign --verify --deep --strict`, and be signed with a `Developer ID Application` certificate, the hardened runtime, and a secure timestamp. If `team-id` is set, the app's team must match it.
 2. Picks the signing identity. When several identities share a name, as happens after a certificate renewal, it picks the one whose certificate expires last.
 3. Copies the app into a fresh staging directory with `ditto`, which keeps framework symlinks, extended attributes, and the signature intact. It also adds an `Applications -> /Applications` symlink.
 4. Creates the image with `hdiutil create`, retrying when hosted runners report `Resource busy`.
-5. Signs the DMG with `codesign --sign <hash> --timestamp` and verifies it with `codesign --verify --strict`.
+5. Signs the DMG with `codesign --sign <hash> --timestamp`, retrying when Apple's timestamp service is unavailable, and verifies it with `codesign --verify --strict`.
 
 ## Usage
 
@@ -40,7 +40,7 @@ Archive once, export with a `developer-id` `ExportOptions.plist`, package, notar
 ```yaml
 jobs:
   release:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v7
 
@@ -120,7 +120,7 @@ jobs:
 
 ## Requirements
 
-- A macOS runner (for example `runs-on: macos-15`).
+- A macOS runner (for example `runs-on: macos-26`).
 - An app exported with the `developer-id` method, so that it's signed with Developer ID Application, a secure timestamp, and the hardened runtime.
 - The Developer ID Application certificate and its private key in a keychain on the runner, for example imported with [`Apple-Actions/import-codesign-certs`](https://github.com/Apple-Actions/import-codesign-certs).
 
@@ -139,7 +139,9 @@ A renewed Developer ID certificate keeps the same name as the one it replaces. W
 
 - **"... is not signed with Developer ID"**: the app came from an App Store (`app-store-connect`) or development export. Export it again with an `ExportOptions.plist` whose `method` is `developer-id`. Notarization would reject the app anyway.
 - **"No valid code signing identity matches ..."**: the imported `.p12` doesn't include a Developer ID Application certificate and private key. Only the Account Holder can create that certificate; the App Store Connect API returns 403 for other keys. The error message lists the identities that were found.
-- **`hdiutil: create failed - Resource busy`**: hosted runners sometimes report this transiently. The action retries automatically, up to 3 attempts.
+- **"... is not signed with the hardened runtime"** or **"... has no secure timestamp"**: notarization would reject the app. Enable Hardened Runtime for the target (`ENABLE_HARDENED_RUNTIME = YES`) and export with the `developer-id` method, which signs with a timestamp.
+- **`hdiutil: create failed - Resource busy`**: hosted runners sometimes report this transiently, usually because XProtect or Spotlight is touching the new image. The action retries automatically, up to 5 attempts.
+- **"The timestamp service is not available"**: Apple's timestamp server is occasionally unreachable. The action retries signing the DMG up to 3 times before failing.
 
 ## Caveats
 
@@ -153,7 +155,7 @@ yarn install
 yarn all     # format, knip, lint, type-check, test, and bundle dist/index.js with esbuild
 ```
 
-The bundled `dist/` directory is committed so the action can be consumed without a build step, matching the Apple-Actions convention. The `e2e` workflow runs the action on `macos-latest` against a test app. It signs with two self-signed certificates that share a Developer ID name, to check that the later-expiring one is picked.
+The bundled `dist/` directory is committed so the action can be consumed without a build step, matching the Apple-Actions convention. The `e2e` workflow runs the action on `macos-26` against a test app. It signs with two self-signed certificates that share a Developer ID name, to check that the later-expiring one is picked.
 
 ## License
 

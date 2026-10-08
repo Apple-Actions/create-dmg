@@ -20326,12 +20326,27 @@ var keychainArgs = (keychain) => keychain ? [keychain] : [];
 function parseSignature(text) {
   const authority = /^Authority=(.+)$/m.exec(text)?.[1].trim();
   const team = /^TeamIdentifier=(.+)$/m.exec(text)?.[1].trim();
-  return { authority, teamId: team && team !== "not set" ? team : void 0 };
+  return {
+    authority,
+    teamId: team && team !== "not set" ? team : void 0,
+    runtime: /^CodeDirectory .*flags=0x[0-9a-f]+\([^)]*\bruntime\b/m.test(text),
+    timestamp: /^Timestamp=/m.test(text)
+  };
 }
 function checkSignature(appPath, sig, teamIdInput) {
   if (!sig.authority?.startsWith(DEVELOPER_ID)) {
     throw new Error(
       `${appPath} is not signed with Developer ID (Authority: ${sig.authority ?? "none, ad-hoc or unsigned"}). Notarization will reject it. Export the app with the developer-id method.`
+    );
+  }
+  if (!sig.runtime) {
+    throw new Error(
+      `${appPath} is not signed with the hardened runtime. Notarization will reject it. Enable Hardened Runtime for the target (ENABLE_HARDENED_RUNTIME = YES).`
+    );
+  }
+  if (!sig.timestamp) {
+    throw new Error(
+      `${appPath} has no secure timestamp. Notarization will reject it. Export the app with the developer-id method, which signs with a timestamp.`
     );
   }
   const appTeam = sig.teamId ?? /\(([A-Z0-9]+)\)$/.exec(sig.authority)?.[1];
@@ -20454,7 +20469,7 @@ Import a Developer ID Application certificate first, for example with Apple-Acti
   );
   return identity.hash;
 }
-async function createImage(args, attempts = 3) {
+async function createImage(args, attempts = 5) {
   for (let attempt = 1; ; attempt++) {
     const out = await getExecOutput("hdiutil", ["create", ...args], {
       ignoreReturnCode: true
@@ -20473,7 +20488,32 @@ ${out.stderr}`.trim();
     warning(
       `hdiutil create attempt ${attempt} failed with Resource busy; retrying`
     );
-    await sleep(2e3 * attempt);
+    await sleep(5e3 * attempt);
+  }
+}
+async function signDmg(hash, dmgPath, keychain, attempts = 3) {
+  const keychainOption = keychain ? ["--keychain", keychain] : [];
+  for (let attempt = 1; ; attempt++) {
+    const out = await getExecOutput(
+      "codesign",
+      ["--sign", hash, "--timestamp", "--force", ...keychainOption, dmgPath],
+      { ignoreReturnCode: true }
+    );
+    if (out.exitCode === 0) return;
+    const text = `${out.stdout}
+${out.stderr}`.trim();
+    if (!/timestamp/i.test(text)) {
+      throw new Error(`codesign failed for ${dmgPath}: ${text}`);
+    }
+    if (attempt >= attempts) {
+      throw new Error(
+        `codesign could not get a secure timestamp after ${attempts} attempts: ${text}`
+      );
+    }
+    warning(
+      `codesign attempt ${attempt} failed to get a secure timestamp; retrying`
+    );
+    await sleep(1e4 * attempt);
   }
 }
 
@@ -20543,14 +20583,7 @@ async function main() {
       "-ov",
       dmgPath
     ]);
-    const keychainArgs2 = keychain ? ["--keychain", keychain] : [];
-    await exec("codesign", [
-      "--sign",
-      hash,
-      "--timestamp",
-      ...keychainArgs2,
-      dmgPath
-    ]);
+    await signDmg(hash, dmgPath, keychain);
     await exec("codesign", ["--verify", "--strict", dmgPath]);
     setOutput("dmg-path", dmgPath);
     setOutput("signing-identity", hash);

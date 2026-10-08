@@ -10,7 +10,8 @@ import {
   parsePemBundle,
   parseSignature,
   pickNewest,
-  selectIdentity
+  selectIdentity,
+  signDmg
 } from '../src/dmg'
 
 vi.mock('@actions/exec', () => ({getExecOutput: vi.fn()}))
@@ -67,14 +68,18 @@ describe('parseSignature', () => {
   it('reads the leaf authority and team', () => {
     expect(parseSignature(DEVELOPER_ID_SIGNATURE)).toEqual({
       authority: 'Developer ID Application: Example Corp (ABCDE12345)',
-      teamId: 'ABCDE12345'
+      teamId: 'ABCDE12345',
+      runtime: true,
+      timestamp: true
     })
   })
 
   it('treats "not set" as no team', () => {
     expect(parseSignature(ADHOC_SIGNATURE)).toEqual({
       authority: undefined,
-      teamId: undefined
+      teamId: undefined,
+      runtime: false,
+      timestamp: false
     })
   })
 })
@@ -95,7 +100,9 @@ describe('checkSignature', () => {
   it('rejects an App Store signature', () => {
     const sig = {
       authority: 'Apple Distribution: Example Corp (ABCDE12345)',
-      teamId: 'ABCDE12345'
+      teamId: 'ABCDE12345',
+      runtime: true,
+      timestamp: true
     }
     expect(() => checkSignature('App.app', sig)).toThrow(
       'Export the app with the developer-id method'
@@ -113,7 +120,33 @@ describe('checkSignature', () => {
   })
 
   it('falls back to the team in the certificate name', () => {
-    expect(checkSignature('App.app', {authority: NAME})).toBe('ABCDE12345')
+    expect(
+      checkSignature('App.app', {
+        authority: NAME,
+        runtime: true,
+        timestamp: true
+      })
+    ).toBe('ABCDE12345')
+  })
+
+  it('rejects an app without the hardened runtime', () => {
+    const text = DEVELOPER_ID_SIGNATURE.replace(
+      'flags=0x10000(runtime)',
+      'flags=0x0(none)'
+    )
+    expect(() => checkSignature('App.app', parseSignature(text))).toThrow(
+      'App.app is not signed with the hardened runtime'
+    )
+  })
+
+  it('rejects an app without a secure timestamp', () => {
+    const text = DEVELOPER_ID_SIGNATURE.replace(
+      /^Timestamp=.*$/m,
+      'Signed Time=Oct 8, 2026 at 5:00:00 PM'
+    )
+    expect(() => checkSignature('App.app', parseSignature(text))).toThrow(
+      'App.app has no secure timestamp'
+    )
   })
 })
 
@@ -233,8 +266,59 @@ describe('createImage', () => {
 
   it('gives up after its attempts are used up', async () => {
     const busy = {exitCode: 16, stderr: 'Resource busy'}
-    respond(busy, busy, busy)
-    await rejects('hdiutil create still busy after 3 attempts')
+    respond(busy, busy, busy, busy, busy)
+    await rejects('hdiutil create still busy after 5 attempts')
+    expect(execOutput).toHaveBeenCalledTimes(5)
+  })
+})
+
+describe('signDmg', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  const timestampDown = {
+    exitCode: 1,
+    stderr: 'App.dmg: The timestamp service is not available.'
+  }
+
+  async function rejects(message: string): Promise<void> {
+    const result = expect(signDmg(NEWER, 'App.dmg')).rejects.toThrow(message)
+    await vi.runAllTimersAsync()
+    await result
+  }
+
+  it('signs with the hash, a timestamp, and the keychain', async () => {
+    respond({exitCode: 0})
+    await signDmg(NEWER, 'App.dmg', 'ci.keychain-db')
+    expect(execOutput.mock.calls[0][1]).toEqual([
+      '--sign',
+      NEWER,
+      '--timestamp',
+      '--force',
+      '--keychain',
+      'ci.keychain-db',
+      'App.dmg'
+    ])
+  })
+
+  it('retries when the timestamp service is unavailable', async () => {
+    respond(timestampDown, {exitCode: 0})
+    const result = signDmg(NEWER, 'App.dmg')
+    await vi.runAllTimersAsync()
+    await result
+    expect(execOutput).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not retry other failures', async () => {
+    respond({exitCode: 1, stderr: `${NEWER}: no identity found`})
+    await rejects('codesign failed for App.dmg')
+    expect(execOutput).toHaveBeenCalledTimes(1)
+  })
+
+  it('gives up after its attempts are used up', async () => {
+    respond(timestampDown, timestampDown, timestampDown)
+    await rejects('codesign could not get a secure timestamp after 3 attempts')
     expect(execOutput).toHaveBeenCalledTimes(3)
   })
 })
