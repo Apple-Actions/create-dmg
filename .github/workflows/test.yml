@@ -1,0 +1,93 @@
+name: test
+
+run-name: test
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - "**"
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Enable corepack (workaround)
+        run: corepack enable
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+          cache: yarn
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: test
+        run: yarn test
+
+  validate-inputs:
+    name: validate-inputs
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+
+      - name: Reject a path that isn't a .app
+        run: |
+          set +e
+          output=$(env \
+            'INPUT_APP-PATH=README.md' \
+            'INPUT_APPLICATIONS-LINK=true' \
+            node dist/index.js)
+          code=$?
+          set -e
+          # Strip the workflow-command prefix so the expected failure isn't
+          # reported as an annotation on this run.
+          echo "${output//::/: :}"
+          test "$code" -ne 0 || { echo "::error::Expected a non-zero exit code"; exit 1; }
+          echo "$output" | grep -qF '::error::`app-path` must end in .app: README.md' \
+            || { echo "::error::Expected the .app requirement in the failure message"; exit 1; }
+
+      - name: Reject a missing app
+        run: |
+          set +e
+          output=$(env \
+            'INPUT_APP-PATH=missing.app' \
+            'INPUT_APPLICATIONS-LINK=true' \
+            node dist/index.js)
+          code=$?
+          set -e
+          echo "${output//::/: :}"
+          test "$code" -ne 0 || { echo "::error::Expected a non-zero exit code"; exit 1; }
+          echo "$output" | grep -qF '::error::Not found: missing.app' \
+            || { echo "::error::Expected a not-found failure message"; exit 1; }
+
+      - name: Reject a runner that isn't macOS
+        run: |
+          mkdir -p "$RUNNER_TEMP/Test.app"
+          set +e
+          output=$(env \
+            "INPUT_APP-PATH=$RUNNER_TEMP/Test.app" \
+            'INPUT_APPLICATIONS-LINK=true' \
+            node dist/index.js)
+          code=$?
+          set -e
+          echo "${output//::/: :}"
+          test "$code" -ne 0 || { echo "::error::Expected a non-zero exit code"; exit 1; }
+          echo "$output" | grep -qF '::error::create-dmg must run on a macOS runner (this one is linux)' \
+            || { echo "::error::Expected a macOS-only failure message"; exit 1; }

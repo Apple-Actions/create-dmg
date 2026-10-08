@@ -1,0 +1,160 @@
+name: e2e
+
+run-name: e2e
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - "**"
+
+jobs:
+  e2e:
+    name: e2e
+    runs-on: macos-latest
+
+    env:
+      CERT_NAME: "Developer ID Application: Test (ABCDE12345)"
+      KEYCHAIN_PASSWORD: create-dmg-e2e
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the test app
+        run: |
+          app="$RUNNER_TEMP/build/CreateDmgTest.app"
+          mkdir -p "$app/Contents/MacOS"
+          cp tests/e2e/Info.plist "$app/Contents/Info.plist"
+          swiftc -O -o "$app/Contents/MacOS/CreateDmgTest" tests/e2e/main.swift
+          echo "APP=$app" >> "$GITHUB_ENV"
+
+      - name: Create two Developer ID certificates with the same name
+        run: |
+          keychain="$RUNNER_TEMP/create-dmg-e2e.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+
+          cd "$RUNNER_TEMP"
+          for days in 30 365; do
+            openssl req -x509 -newkey rsa:2048 -nodes -days "$days" \
+              -keyout "key-$days.pem" -out "cert-$days.pem" \
+              -subj "/CN=$CERT_NAME/OU=ABCDE12345" \
+              -addext "extendedKeyUsage=critical,codeSigning" \
+              -addext "keyUsage=critical,digitalSignature" \
+              -addext "basicConstraints=critical,CA:false"
+            openssl pkcs12 -export -legacy -inkey "key-$days.pem" -in "cert-$days.pem" \
+              -out "cert-$days.p12" -passout pass:p12
+            security import "cert-$days.p12" -k "$keychain" -P p12 -T /usr/bin/codesign
+            sudo security add-trusted-cert -d -r trustRoot -p codeSign -k "$keychain" "cert-$days.pem"
+          done
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$keychain" > /dev/null
+
+          sha1() { openssl x509 -in "$1" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d :; }
+          {
+            echo "KEYCHAIN=$keychain"
+            echo "OLDER=$(sha1 cert-30.pem)"
+            echo "NEWER=$(sha1 cert-365.pem)"
+          } >> "$GITHUB_ENV"
+          security find-identity -v -p codesigning "$keychain"
+
+      - name: Sign the test app with the older certificate
+        run: |
+          codesign --force --sign "$OLDER" --options runtime --timestamp "$APP"
+          codesign -dvv "$APP"
+
+      - name: Create DMG (defaults)
+        id: defaults
+        uses: ./
+        with:
+          app-path: ${{ env.APP }}
+
+      - name: Check the default DMG
+        env:
+          DMG: ${{ steps.defaults.outputs.dmg-path }}
+          IDENTITY: ${{ steps.defaults.outputs.signing-identity }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+
+          test "$DMG" = "$RUNNER_TEMP/build/CreateDmgTest.dmg" || fail "Unexpected dmg-path: $DMG"
+          test "$IDENTITY" = "$NEWER" || fail "Expected the later-expiring identity $NEWER, got $IDENTITY (older is $OLDER)"
+
+          info=$(codesign -dvv "$DMG" 2>&1)
+          echo "$info"
+          echo "$info" | grep -q '^Timestamp=' || fail "The DMG has no secure timestamp"
+          echo "$info" | grep -qxF "Authority=$CERT_NAME" || fail "The DMG isn't signed by $CERT_NAME"
+
+          codesign -d --extract-certificates="$RUNNER_TEMP/dmg-cert-" "$DMG"
+          leaf=$(openssl x509 -inform DER -in "$RUNNER_TEMP/dmg-cert-0" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d :)
+          test "$leaf" = "$NEWER" || fail "The DMG is signed with $leaf, not $NEWER"
+
+          mount=$(hdiutil attach -nobrowse -readonly "$DMG" | awk -F'\t' '/\/Volumes\// { print $NF }')
+          ls -la "$mount"
+          test "$mount" = "/Volumes/CreateDmgTest" || { hdiutil detach "$mount"; fail "Unexpected volume: $mount"; }
+          test -d "$mount/CreateDmgTest.app" || { hdiutil detach "$mount"; fail "The app is missing from the DMG"; }
+          link=$(readlink "$mount/Applications")
+          hdiutil detach "$mount"
+          test "$link" = "/Applications" || fail "Expected an Applications -> /Applications symlink, got '$link'"
+
+      - name: Create DMG (custom options)
+        id: custom
+        uses: ./
+        with:
+          app-path: ${{ env.APP }}
+          dmg-path: ${{ runner.temp }}/out/nested/Custom.dmg
+          volume-name: Custom
+          applications-link: false
+          keychain: ${{ env.KEYCHAIN }}
+          team-id: ABCDE12345
+
+      - name: Check the custom DMG
+        env:
+          DMG: ${{ steps.custom.outputs.dmg-path }}
+          IDENTITY: ${{ steps.custom.outputs.signing-identity }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+
+          test "$DMG" = "$RUNNER_TEMP/out/nested/Custom.dmg" || fail "Unexpected dmg-path: $DMG"
+          test "$IDENTITY" = "$NEWER" || fail "Expected $NEWER, got $IDENTITY"
+
+          mount=$(hdiutil attach -nobrowse -readonly "$DMG" | awk -F'\t' '/\/Volumes\// { print $NF }')
+          ls -la "$mount"
+          has_link=$(test -L "$mount/Applications" && echo yes || echo no)
+          hdiutil detach "$mount"
+          test "$mount" = "/Volumes/Custom" || fail "Unexpected volume: $mount"
+          test "$has_link" = "no" || fail "Expected no Applications symlink"
+
+      - name: Reject an ad-hoc signed app
+        run: |
+          adhoc="$RUNNER_TEMP/adhoc/CreateDmgTest.app"
+          mkdir -p "$(dirname "$adhoc")"
+          ditto "$APP" "$adhoc"
+          codesign --force --sign - "$adhoc"
+          set +e
+          output=$(env \
+            "INPUT_APP-PATH=$adhoc" \
+            'INPUT_APPLICATIONS-LINK=true' \
+            'INPUT_FORMAT=UDZO' \
+            node dist/index.js)
+          code=$?
+          set -e
+          # Strip the workflow-command prefix so the expected failure isn't
+          # reported as an annotation on this run.
+          echo "${output//::/: :}"
+          test "$code" -ne 0 || { echo "::error::Expected a non-zero exit code"; exit 1; }
+          echo "$output" | grep -qF "::error::$adhoc is not signed with Developer ID" \
+            || { echo "::error::Expected the Developer ID failure message"; exit 1; }
+
+      - name: Clean up
+        if: always()
+        run: |
+          for days in 30 365; do
+            if [ -f "$RUNNER_TEMP/cert-$days.pem" ]; then
+              sudo security remove-trusted-cert -d "$RUNNER_TEMP/cert-$days.pem" || true
+            fi
+          done
+          security delete-keychain "$RUNNER_TEMP/create-dmg-e2e.keychain-db" || true

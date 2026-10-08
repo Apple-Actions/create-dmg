@@ -1,0 +1,41 @@
+name: 'Create DMG'
+description: 'Package a macOS .app into a signed DMG for notarization'
+author: 'Itty Bitty Apps Pty Ltd'
+inputs:
+  app-path:
+    description: "Path to the exported .app (for example the xcodebuild action's app-path output)"
+    required: true
+  dmg-path:
+    description: 'Output path. Defaults to <app name>.dmg next to the .app'
+    required: false
+  volume-name:
+    description: "Volume name shown in Finder. Defaults to the app's CFBundleName (falls back to the .app file name)"
+    required: false
+  signing-identity:
+    description: 'SHA-1 hash or full name of the identity that signs the DMG. Defaults to the newest valid "Developer ID Application" identity, filtered by team-id'
+    required: false
+  team-id:
+    description: "Team ID used to select the identity and to check the app's signature. Defaults to the app's TeamIdentifier"
+    required: false
+  keychain:
+    description: 'Keychain to search for the identity. Defaults to the user search list'
+    required: false
+  applications-link:
+    description: 'Add an /Applications symlink so users can drag to install'
+    required: false
+    default: 'true'
+  format:
+    description: 'hdiutil image format (UDZO, ULFO, ULMO, UDBZ)'
+    required: false
+    default: 'UDZO'
+outputs:
+  dmg-path:
+    description: 'Absolute path of the signed DMG'
+  signing-identity:
+    description: 'SHA-1 hash of the identity that signed the DMG'
+runs:
+  using: 'node24'
+  main: 'dist/index.js'
+branding:
+  icon: 'package'
+  color: 'blue'
