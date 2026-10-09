@@ -10,6 +10,9 @@ on:
     branches:
       - "**"
 
+permissions:
+  contents: read
+
 jobs:
   e2e:
     name: e2e
@@ -23,6 +26,8 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Build the test app
         run: |
@@ -38,6 +43,7 @@ jobs:
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          # shellcheck disable=SC2046
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
 
           cd "$RUNNER_TEMP"
@@ -70,7 +76,7 @@ jobs:
 
       - name: Create DMG (defaults)
         id: defaults
-        uses: ./
+        uses: ./ # zizmor: ignore[self-repository] actionlint does not support $/ yet
         with:
           app-path: ${{ env.APP }}
 
@@ -103,7 +109,7 @@ jobs:
 
       - name: Create DMG (custom options)
         id: custom
-        uses: ./
+        uses: ./ # zizmor: ignore[self-repository] actionlint does not support $/ yet
         with:
           app-path: ${{ env.APP }}
           dmg-path: ${{ runner.temp }}/out/nested/Custom.dmg
