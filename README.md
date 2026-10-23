@@ -157,6 +157,12 @@ yarn all     # format, knip, lint, type-check, test, and bundle dist/index.js wi
 
 The bundled `dist/` directory is committed so the action can be consumed without a build step, matching the Apple-Actions convention. The `e2e` workflow runs the action on `macos-26` against a test app. It signs with two self-signed certificates that share a Developer ID name, to check that the later-expiring one is picked.
 
+## Release
+
+`package.json` `version` is the version currently queued for the next release. Merge work to `main`, then ship with **Actions → Release → Run workflow** (default branch). CI tags `vX.Y.Z`, moves the major `vX` tag, creates a GitHub Release, and bumps `package.json` to the next minor so later changes queue for that version. Consumers on `@vN` pick up the new tip when the major tag moves.
+
+For a major or patch instead of the queued minor, edit `package.json` on a PR first, merge, then run Release.
+
 ## License
 
 MIT
