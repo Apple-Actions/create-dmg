@@ -1,6 +1,6 @@
 {
   "name": "create-dmg-action",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "GitHub Action to package a Developer ID macOS .app into a signed DMG ready for notarization.",
   "type": "module",
   "main": "src/main.ts",
